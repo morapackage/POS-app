@@ -1,124 +1,208 @@
 import express from "express";
 import fetch from "node-fetch";
-import bodyParser from "body-parser";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 const app = express();
-app.use(bodyParser.json());
-app.use(express.static("public"));
+const PORT = process.env.PORT || 5000;
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+
+// DWOLLA config
 const DWOLLA_BASE = "https://api-sandbox.dwolla.com";
 const DWOLLA_KEY = process.env.DWOLLA_KEY;
 const DWOLLA_SECRET = process.env.DWOLLA_SECRET;
 
-async function getToken() {
-  const res = await fetch(`${DWOLLA_BASE}/token`, {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + Buffer.from(`${DWOLLA_KEY}:${DWOLLA_SECRET}`).toString("base64"),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  return res.json();
+// Basic Auth
+const authHeader =
+  "Basic " +
+  Buffer.from(`${DWOLLA_KEY}:${DWOLLA_SECRET}`).toString("base64");
+
+// Helper: better Dwolla error handling
+async function handleDwollaResponse(response, res) {
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("Dwolla API Error:", errorText);
+
+    try {
+      const errorJson = JSON.parse(errorText);
+      return res.status(response.status).json(errorJson);
+    } catch {
+      return res.status(response.status).send(errorText);
+    }
+  }
+  return response;
 }
 
-// Create Customer
+/**
+ * 1️⃣ Create Customer
+ */
 app.post("/api/create-customer", async (req, res) => {
   try {
-    const { access_token } = await getToken();
+    const { firstName, lastName, email, address, city, state, postalCode, ssn, dob } =
+      req.body;
+
     const response = await fetch(`${DWOLLA_BASE}/customers`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${access_token}`,
         "Content-Type": "application/json",
+        Authorization: authHeader,
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify({
+        firstName,
+        lastName,
+        email,
+        type: "personal",
+        address1: address,
+        city,
+        state,
+        postalCode,
+        ssn,
+        dateOfBirth: dob,
+      }),
     });
 
-    if (!response.ok) return res.status(400).json(await response.json());
-    const location = response.headers.get("location");
-    res.json({ customerUrl: location });
+    const handled = await handleDwollaResponse(response, res);
+    if (!handled.ok) return;
+
+    const customerUrl = handled.headers.get("location");
+    res.json({ message: "✅ Customer created", customerUrl });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Server error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Add Funding Source
-app.post("/api/add-funding-source", async (req, res) => {
+/**
+ * 2️⃣ Add Bank Account
+ */
+app.post("/api/add-bank", async (req, res) => {
   try {
-    const { customerUrl, routingNumber, accountNumber } = req.body;
-    const { access_token } = await getToken();
+    const { customerUrl, routingNumber, accountNumber, bankName } = req.body;
+
     const response = await fetch(`${customerUrl}/funding-sources`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${access_token}`,
         "Content-Type": "application/json",
+        Authorization: authHeader,
       },
       body: JSON.stringify({
         routingNumber,
         accountNumber,
         bankAccountType: "checking",
-        name: "Customer Bank",
+        name: bankName || "Customer Bank",
       }),
     });
 
-    if (!response.ok) return res.status(400).json(await response.json());
-    const location = response.headers.get("location");
-    res.json({ fundingSourceUrl: location });
+    const handled = await handleDwollaResponse(response, res);
+    if (!handled.ok) return;
+
+    const bankUrl = handled.headers.get("location");
+    res.json({ message: "✅ Bank added", bankUrl });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Server error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Initiate Micro-Deposits
-app.post("/api/initiate-micro-deposits", async (req, res) => {
+/**
+ * 3️⃣ Initiate Trial Deposits
+ */
+app.post("/api/trial-deposit", async (req, res) => {
   try {
-    const { fundingSourceUrl } = req.body;
-    const { access_token } = await getToken();
-    const response = await fetch(`${fundingSourceUrl}/micro-deposits`, {
+    const { bankUrl } = req.body;
+
+    const response = await fetch(`${bankUrl}/micro-deposits`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${access_token}`,
-        "Content-Type": "application/json",
+        Authorization: authHeader,
       },
     });
 
-    if (!response.ok) return res.status(400).json(await response.json());
-    res.json({ message: "Micro-deposits initiated." });
+    const handled = await handleDwollaResponse(response, res);
+    if (!handled.ok) return;
+
+    res.json({ message: "✅ Trial deposits started" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Server error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Make Payment
-app.post("/api/make-payment", async (req, res) => {
+/**
+ * 4️⃣ Verify Trial Deposits
+ */
+app.post("/api/verify-bank", async (req, res) => {
   try {
-    const { fundingSourceUrl, amount } = req.body;
-    const { access_token } = await getToken();
+    const { bankUrl, amount1, amount2 } = req.body;
+
+    const response = await fetch(`${bankUrl}/micro-deposits`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authHeader,
+      },
+      body: JSON.stringify({
+        amount1: { value: amount1, currency: "USD" },
+        amount2: { value: amount2, currency: "USD" },
+      }),
+    });
+
+    const handled = await handleDwollaResponse(response, res);
+    if (!handled.ok) return;
+
+    res.json({ message: "✅ Bank verified" });
+  } catch (err) {
+    console.error("Server error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * 5️⃣ Make Payment (bank → Dwolla master funding source)
+ */
+app.post("/api/payment", async (req, res) => {
+  try {
+    const { bankUrl, amount } = req.body;
+
+    // Dwolla's sandbox master funding source
+    const masterFS = "https://api-sandbox.dwolla.com/funding-sources/MASTER_FUNDING_SOURCE_ID";
 
     const response = await fetch(`${DWOLLA_BASE}/transfers`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${access_token}`,
         "Content-Type": "application/json",
+        Authorization: authHeader,
       },
       body: JSON.stringify({
         _links: {
-          source: { href: fundingSourceUrl },
-          destination: { href: "https://api-sandbox.dwolla.com/funding-sources/YOUR_MASTER_FUNDING_SOURCE_ID" }
+          source: { href: bankUrl },
+          destination: { href: masterFS },
         },
-        amount: { currency: "USD", value: amount }
+        amount: {
+          currency: "USD",
+          value: amount,
+        },
       }),
     });
 
-    if (!response.ok) return res.status(400).json(await response.json());
-    const location = response.headers.get("location");
-    res.json({ transferUrl: location });
+    const handled = await handleDwollaResponse(response, res);
+    if (!handled.ok) return;
+
+    const transferUrl = handled.headers.get("location");
+    res.json({ message: "✅ Payment initiated", transferUrl });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Server error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-app.listen(4242, () => console.log("🚀 Server running on port 4242"));
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
