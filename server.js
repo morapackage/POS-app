@@ -1,136 +1,124 @@
 import express from "express";
 import fetch from "node-fetch";
 import bodyParser from "body-parser";
-import path from "path";
-import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 4242;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static("public"));
 
-// Dwolla credentials (Sandbox)
 const DWOLLA_BASE = "https://api-sandbox.dwolla.com";
 const DWOLLA_KEY = process.env.DWOLLA_KEY;
 const DWOLLA_SECRET = process.env.DWOLLA_SECRET;
 
-// Get OAuth token
-async function getDwollaToken() {
-  const response = await fetch(`${DWOLLA_BASE}/token`, {
+async function getToken() {
+  const res = await fetch(`${DWOLLA_BASE}/token`, {
     method: "POST",
     headers: {
+      Authorization: "Basic " + Buffer.from(`${DWOLLA_KEY}:${DWOLLA_SECRET}`).toString("base64"),
       "Content-Type": "application/x-www-form-urlencoded",
-      Authorization:
-        "Basic " +
-        Buffer.from(`${DWOLLA_KEY}:${DWOLLA_SECRET}`).toString("base64"),
     },
     body: "grant_type=client_credentials",
   });
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error("Failed to get Dwolla token: " + err);
-  }
-  return response.json();
+  return res.json();
 }
 
-// Create customer → Add bank → Micro-deposits
+// Create Customer
 app.post("/api/create-customer", async (req, res) => {
   try {
-    const form = req.body;
-    const tokenData = await getDwollaToken();
-
-    // 1. Create Verified Customer
-    const customerRes = await fetch(`${DWOLLA_BASE}/customers`, {
+    const { access_token } = await getToken();
+    const response = await fetch(`${DWOLLA_BASE}/customers`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-        "Content-Type": "application/json",
-        Accept: "application/vnd.dwolla.v1.hal+json",
-      },
-      body: JSON.stringify({
-        firstName: form.firstName,
-        lastName: form.lastName,
-        email: form.email,
-        phone: form.phone,
-        address1: form.address1,
-        city: form.city,
-        state: form.state,
-        postalCode: form.postalCode,
-        dateOfBirth: form.dateOfBirth,
-        ssn: form.ssn,
-        type: "personal",
-      }),
-    });
-
-    if (!customerRes.ok) {
-      const errorData = await customerRes.json();
-      return res.status(400).json(errorData);
-    }
-
-    const customerUrl = customerRes.headers.get("location");
-
-    // 2. Add Funding Source (Bank)
-    const fundingRes = await fetch(`${DWOLLA_BASE}/funding-sources`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-        "Content-Type": "application/json",
-        Accept: "application/vnd.dwolla.v1.hal+json",
-      },
-      body: JSON.stringify({
-        routingNumber: form.routingNumber,
-        accountNumber: form.accountNumber,
-        type: "checking",
-        name: `${form.firstName} ${form.lastName} Bank`,
-        _links: { customer: { href: customerUrl } },
-      }),
-    });
-
-    if (!fundingRes.ok) {
-      const errorData = await fundingRes.json();
-      return res.status(400).json(errorData);
-    }
-
-    const fundingUrl = fundingRes.headers.get("location");
-
-    // 3. Initiate Micro-Deposits
-    const depositRes = await fetch(`${fundingUrl}/micro-deposits`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
+        Authorization: `Bearer ${access_token}`,
         "Content-Type": "application/json",
       },
+      body: JSON.stringify(req.body),
     });
 
-    if (!depositRes.ok) {
-      const errorData = await depositRes.json();
-      return res.status(400).json(errorData);
-    }
-
-    return res.json({
-      message:
-        "✅ Customer created, bank added, and micro-deposits sent. Please verify deposits in Sandbox Dashboard.",
-      customerUrl,
-      fundingUrl,
-    });
+    if (!response.ok) return res.status(400).json(await response.json());
+    const location = response.headers.get("location");
+    res.json({ customerUrl: location });
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Home route
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+// Add Funding Source
+app.post("/api/add-funding-source", async (req, res) => {
+  try {
+    const { customerUrl, routingNumber, accountNumber } = req.body;
+    const { access_token } = await getToken();
+    const response = await fetch(`${customerUrl}/funding-sources`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        routingNumber,
+        accountNumber,
+        bankAccountType: "checking",
+        name: "Customer Bank",
+      }),
+    });
+
+    if (!response.ok) return res.status(400).json(await response.json());
+    const location = response.headers.get("location");
+    res.json({ fundingSourceUrl: location });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
-);
+// Initiate Micro-Deposits
+app.post("/api/initiate-micro-deposits", async (req, res) => {
+  try {
+    const { fundingSourceUrl } = req.body;
+    const { access_token } = await getToken();
+    const response = await fetch(`${fundingSourceUrl}/micro-deposits`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) return res.status(400).json(await response.json());
+    res.json({ message: "Micro-deposits initiated." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Make Payment
+app.post("/api/make-payment", async (req, res) => {
+  try {
+    const { fundingSourceUrl, amount } = req.body;
+    const { access_token } = await getToken();
+
+    const response = await fetch(`${DWOLLA_BASE}/transfers`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        _links: {
+          source: { href: fundingSourceUrl },
+          destination: { href: "https://api-sandbox.dwolla.com/funding-sources/YOUR_MASTER_FUNDING_SOURCE_ID" }
+        },
+        amount: { currency: "USD", value: amount }
+      }),
+    });
+
+    if (!response.ok) return res.status(400).json(await response.json());
+    const location = response.headers.get("location");
+    res.json({ transferUrl: location });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(4242, () => console.log("🚀 Server running on port 4242"));
