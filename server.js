@@ -1,139 +1,78 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SmartPay – Secure Payments</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-  <style>
-    body { background: #f9fafb; font-family: "Inter", sans-serif; }
-    .form-card { border-radius: 15px; box-shadow: 0 8px 20px rgba(0,0,0,0.05); }
-    .logo { max-height: 60px; margin-bottom: 20px; }
-    .spinner-border { display: none; }
-    .toast-container { position: fixed; top: 20px; right: 20px; z-index: 2000; }
-  </style>
-</head>
-<body>
-  <div class="container py-5">
-    <div class="row justify-content-center">
-      <div class="col-lg-10">
-        <div class="card form-card p-4">
-          <div class="text-center">
-            <img src="https://dummyimage.com/200x60/0d6efd/ffffff&text=SmartPay+Logo" class="logo" alt="SmartPay Logo" />
-            <h3 class="mb-3"><i class="fa-solid fa-building-columns me-2"></i> Secure Bank Linking</h3>
-            <p class="text-muted">Link your bank account, verify instantly, and make payments securely.</p>
-          </div>
+import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
+import bodyParser from "body-parser";
+import dotenv from "dotenv";
+import dwolla from "dwolla-v2";
 
-          <form id="paymentForm" class="row g-3">
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-user me-2"></i> First Name</label>
-              <input type="text" class="form-control" name="firstName" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-user me-2"></i> Last Name</label>
-              <input type="text" class="form-control" name="lastName" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-envelope me-2"></i> Email</label>
-              <input type="email" class="form-control" name="email" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-phone me-2"></i> Phone</label>
-              <input type="text" class="form-control" name="phone" required>
-            </div>
-            <div class="col-12">
-              <label class="form-label"><i class="fa-solid fa-location-dot me-2"></i> Address</label>
-              <input type="text" class="form-control" name="address" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-city me-2"></i> City</label>
-              <input type="text" class="form-control" name="city" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-flag-usa me-2"></i> State</label>
-              <input type="text" class="form-control" name="state" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-map-pin me-2"></i> Postal Code</label>
-              <input type="text" class="form-control" name="postalCode" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-calendar me-2"></i> Date of Birth</label>
-              <input type="date" class="form-control" name="dateOfBirth" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-id-card me-2"></i> SSN (last 4 digits)</label>
-              <input type="text" class="form-control" name="ssn" maxlength="4" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-university me-2"></i> Bank Routing Number</label>
-              <input type="text" class="form-control" name="routingNumber" required>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label"><i class="fa-solid fa-credit-card me-2"></i> Bank Account Number</label>
-              <input type="text" class="form-control" name="accountNumber" required>
-            </div>
+dotenv.config();
 
-            <div class="col-12 text-center">
-              <button type="submit" class="btn btn-primary px-5">
-                <span class="btn-text">Submit</span>
-                <div class="spinner-border spinner-border-sm ms-2" role="status"></div>
-              </button>
-            </div>
-          </form>
+const app = express();
+const PORT = process.env.PORT || 4242;
 
-          <div class="toast-container"></div>
-        </div>
-      </div>
-    </div>
-  </div>
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    const form = document.getElementById("paymentForm");
-    const button = form.querySelector("button");
-    const spinner = button.querySelector(".spinner-border");
-    const btnText = button.querySelector(".btn-text");
-    const toastContainer = document.querySelector(".toast-container");
+// Middleware
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      spinner.style.display = "inline-block";
-      btnText.textContent = "Processing...";
+// Dwolla client
+const client = new dwolla.Client({
+  key: process.env.DWOLLA_KEY,
+  secret: process.env.DWOLLA_SECRET,
+  environment: "sandbox"
+});
 
-      const formData = Object.fromEntries(new FormData(form));
+// API: Create customer + attach funding source
+app.post("/api/create-customer", async (req, res) => {
+  try {
+    const {
+      firstName, lastName, email, phone, address,
+      city, state, postalCode, dateOfBirth, ssn,
+      routingNumber, accountNumber
+    } = req.body;
 
-      try {
-        const res = await fetch("/api/create-customer", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(formData)
-        });
-        const data = await res.json();
-
-        showToast(data.message || "Request processed successfully", res.ok ? "success" : "danger");
-      } catch (err) {
-        showToast("Error connecting to server", "danger");
-      } finally {
-        spinner.style.display = "none";
-        btnText.textContent = "Submit";
-      }
+    // Create customer
+    const customerRes = await client.post("customers", {
+      firstName,
+      lastName,
+      email,
+      type: "personal",
+      address1: address,
+      city,
+      state,
+      postalCode,
+      dateOfBirth,
+      ssn,
+      phone
     });
 
-    function showToast(message, type="info") {
-      const wrapper = document.createElement("div");
-      wrapper.innerHTML = `
-        <div class="toast align-items-center text-bg-${type} border-0 mb-2" role="alert">
-          <div class="d-flex">
-            <div class="toast-body">${message}</div>
-            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-          </div>
-        </div>`;
-      toastContainer.append(wrapper);
-      const toast = new bootstrap.Toast(wrapper.querySelector(".toast"));
-      toast.show();
-    }
-  </script>
-</body>
-</html>
+    const customerUrl = customerRes.headers.get("location");
+
+    // Add funding source
+    const fundingRes = await client.post(`${customerUrl}/funding-sources`, {
+      routingNumber,
+      accountNumber,
+      type: "checking",
+      name: `${firstName} ${lastName} Bank Account`
+    });
+
+    res.json({
+      success: true,
+      message: "Customer and funding source created successfully",
+      customer: customerUrl,
+      fundingSource: fundingRes.headers.get("location")
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({
+      success: false,
+      message: err.body ? JSON.stringify(err.body) : err.message
+    });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
